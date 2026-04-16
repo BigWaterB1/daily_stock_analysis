@@ -39,6 +39,15 @@ jobs:
           print(f"今日 {today} {'是' if is_trading else '非'} A 股交易日")
           EOF
 
+      - name: Notify on failure
+        if: failure()
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST "$FEISHU_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ Actions 失败：开盘前晨报 (#${{ github.run_number }})\\n查看: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}}"
+
       - name: Run pre-market report
         if: steps.check.outputs.is_trading == 'true'
         env:

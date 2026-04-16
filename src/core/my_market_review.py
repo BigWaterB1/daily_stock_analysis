@@ -21,6 +21,7 @@
 """
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
@@ -101,6 +102,51 @@ def _esc(text: str) -> str:
     return text.replace('*', '\\*')
 
 
+def _trend_label(open_p: float, high: float, low: float, close: float, prev_close: float) -> str:
+    """生成上证指数走势简描，如「高开走强」「低开震荡」"""
+    if not prev_close or not open_p or prev_close <= 0:
+        return ""
+    gap_pct = (open_p - prev_close) / prev_close * 100
+    open_lbl = "高开" if gap_pct > 0.2 else ("低开" if gap_pct < -0.2 else "平开")
+    rng = high - low
+    if rng < 0.01:
+        return open_lbl
+    up_ratio = (close - open_p) / rng
+    trend_lbl = "走强" if up_ratio > 0.4 else ("走弱" if up_ratio < -0.4 else "震荡")
+    return open_lbl + trend_lbl
+
+
+def _get_recent_trading_dates(n: int = 5) -> list[str]:
+    """返回最近 n 个已收盘交易日（YYYYMMDD，从旧到新）"""
+    import akshare as ak
+    import pandas as pd
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+    from datetime import datetime as _dt, timedelta
+
+    tz_sh = ZoneInfo('Asia/Shanghai')
+    now = _dt.now(tz_sh)
+    cutoff = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    ref_date = now.date() if now >= cutoff else now.date() - timedelta(days=1)
+
+    try:
+        df = ak.tool_trade_date_hist_sina()
+        col = df.columns[0]
+        dates = pd.to_datetime(df[col]).dt.date
+        past = sorted(dates[dates <= ref_date].tolist(), reverse=True)[:n]
+        return [d.strftime('%Y%m%d') for d in reversed(past)]
+    except Exception:
+        result = []
+        d = ref_date
+        while len(result) < n:
+            if d.weekday() < 5:
+                result.append(d.strftime('%Y%m%d'))
+            d -= timedelta(days=1)
+        return list(reversed(result))
+
+
 # ─────────────────────────────────────────────
 # 数据获取
 # ─────────────────────────────────────────────
@@ -127,6 +173,10 @@ def _fetch_indices() -> list[dict]:
                 'current': float(row.get('最新价', 0) or 0),
                 'change_pct': float(row.get('涨跌幅', 0) or 0),
                 'amount_yi': round(amount_raw / 1e8, 0),
+                'open': float(row.get('今开', 0) or 0),
+                'high': float(row.get('最高', 0) or 0),
+                'low': float(row.get('最低', 0) or 0),
+                'prev_close': float(row.get('昨收', 0) or 0),
             })
     except Exception as e:
         logger.warning(f"[指数] 新浪接口获取失败: {e}")
@@ -579,109 +629,50 @@ def _fetch_stock_concepts(stock_names: list[str]) -> dict[str, list[str]]:
     return stock_to_concepts
 
 
-def _group_limit_up_by_ai(stocks: list[dict], analyzer) -> list[dict]:
+def _fetch_sentiment_trend(trade_dates: list[str]) -> list[int]:
     """
-    调用 LLM 对涨停股进行主题分类。
-    analyzer: GeminiAnalyzer 实例（需 is_available()）
-    返回 list[dict]：group_name, count, stocks（已排序）
-    AI 失败时自动回退到行业分组。
+    获取近 N 交易日涨停数量（从旧到新），用于情绪追踪。
+    顺序执行避免频率限制。
     """
-    import json
+    import akshare as ak
+    counts = []
+    for d in trade_dates:
+        try:
+            df = ak.stock_zt_pool_em(date=d)
+            counts.append(len(df) if df is not None else 0)
+        except Exception:
+            counts.append(0)
+        time.sleep(0.3)
+    return counts
+
+
+def _group_limit_up_by_industry(stocks: list[dict]) -> list[dict]:
+    """按东财板块对涨停股分组（stock_zt_pool_em 的所属行业字段），按组内数量降序排列。"""
     from collections import defaultdict
-
-    # ── 回退：按行业分组 ──────────────────────────
-    def _fallback() -> list[dict]:
-        groups: dict[str, list[dict]] = defaultdict(list)
-        for s in stocks:
-            groups[s['industry'] or '其他'].append(s)
-        result = []
-        for gname, members in groups.items():
-            members.sort(key=lambda x: x['lianban'], reverse=True)
-            result.append({'group_name': gname, 'count': len(members), 'stocks': members})
-        result.sort(key=lambda x: x['count'], reverse=True)
-        return result
-
-    if not analyzer or not analyzer.is_available():
-        return _fallback()
-
-    # ── 构建 prompt ──────────────────────────────
-    concept_bg = _fetch_concept_events()
-
-    # 尝试获取每只股票所属热门概念（东财接口，本机代理可能失败，Actions上可用）
-    stock_names = [s['name'] for s in stocks]
-    stock_concepts = _fetch_stock_concepts(stock_names)
-
-    stock_lines = []
+    groups: dict[str, list[dict]] = defaultdict(list)
     for s in stocks:
-        lb      = f"，{s['lianban']}连板" if s['lianban'] > 1 else ""
-        rsn     = f"，强势理由：{s['reason']}" if s['reason'] else ""
-        concepts = stock_concepts.get(s['name'], [])
-        cpt     = f"，所属概念：{'、'.join(concepts[:3])}" if concepts else ""
-        stock_lines.append(f"- {s['name']}（行业：{s['industry']}{cpt}{lb}{rsn}）")
+        groups[s['industry'] or '其他'].append(s)
+    result = []
+    for gname, members in groups.items():
+        members.sort(key=lambda x: x['lianban'], reverse=True)
+        result.append({'group_name': gname, 'count': len(members), 'stocks': members})
+    result.sort(key=lambda x: x['count'], reverse=True)
+    return result
 
-    prompt = f"""你是A股市场分析师，擅长识别个股涨停背后的真实题材原因。
 
-今日涨停股票（格式：股票名（所属行业，连板数，强势股入选理由））：
-{chr(10).join(stock_lines)}
-
-近期同花顺热门概念板块及驱动事件（用于判断市场主线题材）：
-{concept_bg if concept_bg else '（无数据）'}
-
-任务：根据你对A股市场的了解，结合上述概念驱动事件，推断每只股票的**真实涨停题材**，并将股票按题材分组。
-
-注意：
-- 股票的"所属行业"是其主营业务分类，不一定等于涨停原因（例如生产航天零件的塑料厂可能因"商业航天"概念涨停）
-- 优先用概念/政策/事件命名主题（如"商业航天"、"创新药出海"、"电网改造"），而非行业名
-- 相同题材合并为一组，主题名不超过8字
-- 每只股票只属于一个组，无明确题材的归入"其他"
-- 只返回 JSON，不要有任何其他文字：
-[
-  {{"group": "主题名", "stocks": ["股票名1", "股票名2"]}},
-  ...
-]"""
-
-    try:
-        resp = analyzer.generate_text(prompt, max_tokens=1500, temperature=0.3)
-        if not resp:
-            raise ValueError("LLM 返回空")
-
-        # 提取 JSON（可能被 markdown 代码块包裹）
-        text = resp.strip()
-        if '```' in text:
-            text = text.split('```')[1]
-            if text.startswith('json'):
-                text = text[4:]
-        groups_raw = json.loads(text.strip())
-
-        # 构建 name -> stock dict 方便查找
-        name_to_stock = {s['name']: s for s in stocks}
-        result = []
-        matched = set()
-        for g in groups_raw:
-            gname   = str(g.get('group', '其他')).strip()
-            members = []
-            for sname in g.get('stocks', []):
-                sname = str(sname).strip()
-                if sname in name_to_stock and sname not in matched:  # 防重复
-                    members.append(name_to_stock[sname])
-                    matched.add(sname)
-            if members:
-                members.sort(key=lambda x: x['lianban'], reverse=True)
-                result.append({'group_name': gname, 'count': len(members), 'stocks': members})
-
-        # 未被 AI 覆盖的股票放入"其他"
-        unmatched = [s for s in stocks if s['name'] not in matched]
-        if unmatched:
-            unmatched.sort(key=lambda x: x['lianban'], reverse=True)
-            result.append({'group_name': '其他', 'count': len(unmatched), 'stocks': unmatched})
-
-        result.sort(key=lambda x: x['count'], reverse=True)
-        logger.info(f"[涨停AI分类] 共 {len(result)} 个主题")
-        return result
-
-    except Exception as e:
-        logger.warning(f"[涨停AI分类] 失败，回退行业分组: {e}")
-        return _fallback()
+def _build_lianban_ladder(stocks: list[dict]) -> str:
+    """生成连板梯队文本，按连板数从高到低分行展示。"""
+    from collections import defaultdict
+    ladder: dict[int, list[str]] = defaultdict(list)
+    for s in stocks:
+        ladder[s['lianban']].append(_esc(s['name']))
+    lines = []
+    for lb in sorted(ladder.keys(), reverse=True):
+        names = ladder[lb]
+        lbl = f"{lb}连板" if lb > 1 else "首板"
+        names_str = "　".join(names[:10]) + ("…" if len(names) > 10 else "")
+        lines.append(f"**{lbl}**（{len(names)}只）　{names_str}")
+    return "\n".join(lines)
 
 
 def _build_report(
@@ -691,6 +682,8 @@ def _build_report(
     bot_sectors: list[dict],
     prev_amount: Optional[float] = None,
     limit_up_groups: Optional[list] = None,
+    sentiment_trend: Optional[list] = None,
+    zt_stocks: Optional[list] = None,
 ) -> str:
     date_str = _get_last_trading_date()
     lines = [f"## {date_str} 大盘日报\n"]
@@ -711,8 +704,14 @@ def _build_report(
             f"平盘 **{stats['flat_count']}** 家 | "
             f"涨停 **{stats['limit_up_count']}** / "
             f"跌停 **{stats['limit_down_count']}** | "
-            f"成交额 **{today_amt}** 亿{amt_cmp}\n"
+            f"成交额 **{today_amt}** 亿{amt_cmp}"
         )
+        # 情绪指数：近5日涨停趋势
+        if sentiment_trend and len(sentiment_trend) >= 2:
+            arrows = " → ".join(str(x) for x in sentiment_trend[:-1])
+            trend_str = f"{arrows} → **{sentiment_trend[-1]}**"
+            lines.append(f"情绪追踪（近{len(sentiment_trend)}日涨停）：{trend_str}")
+        lines.append("")
     else:
         lines.append("_市场统计数据暂不可用_\n")
 
@@ -722,9 +721,14 @@ def _build_report(
         for idx in indices:
             pct = idx['change_pct']
             amt_str = f"{int(idx['amount_yi'])} 亿" if idx['amount_yi'] > 0 else "-"
+            trend = ""
+            if idx['name'] == '上证指数' and idx.get('prev_close') and idx.get('open'):
+                lbl = _trend_label(idx['open'], idx['high'], idx['low'], idx['current'], idx['prev_close'])
+                if lbl:
+                    trend = f"　{lbl}"
             lines.append(
                 f"**{idx['name']}**　{idx['current']:.2f}　"
-                f"{_c(f'{pct:+.2f}%', pct)}　{amt_str}"
+                f"{_c(f'{pct:+.2f}%', pct)}　{amt_str}{trend}"
             )
         lines.append("")
     else:
@@ -738,7 +742,6 @@ def _build_report(
         for i, s in enumerate(sectors, 1):
             pct = s['change_pct']
             line = f"{i:>2}. **{_esc(s['name'])}** {_c(f'{pct:+.2f}%', pct)}"
-
             stocks = s.get('top_stocks', [])
             if stocks:
                 parts = []
@@ -769,9 +772,16 @@ def _build_report(
 
     # ── 第四部分：涨停分析 ───────────────────────
     lines.append("\n### 四、涨停分析\n")
+    if zt_stocks:
+        total_zt = len(zt_stocks)
+        # 连板梯队
+        lines.append("**连板梯队**\n")
+        lines.append(_build_lianban_ladder(zt_stocks))
+        lines.append("")
+
     if limit_up_groups:
         total_zt = sum(g['count'] for g in limit_up_groups)
-        lines.append(f"共 **{total_zt}** 只涨停，按行业分布：\n")
+        lines.append(f"共 **{total_zt}** 只涨停，按板块分布：\n")
         for g in limit_up_groups:
             lines.append(f"**{_esc(g['group_name'])}**（{g['count']}只）")
             for s in g['stocks']:
@@ -781,7 +791,7 @@ def _build_report(
                     f"　{_esc(s['name'])}　换手 {s['turnover']:.1f}%{lb}{reason}"
                 )
             lines.append("")
-    else:
+    elif not zt_stocks:
         lines.append("_涨停数据暂不可用_\n")
 
     return "\n".join(lines)
@@ -810,11 +820,17 @@ def run_market_review(
         prev_amount  = _fetch_prev_day_amount()
         top_s, bot_s = _fetch_sw_sectors(top_n=10)
 
-        trade_date = _get_last_trading_date().replace('-', '')
-        zt_stocks   = _fetch_limit_up(trade_date)
-        zt_groups   = _group_limit_up_by_ai(zt_stocks, analyzer) if zt_stocks else []
+        trade_date      = _get_last_trading_date().replace('-', '')
+        recent_dates    = _get_recent_trading_dates(5)
+        sentiment_trend = _fetch_sentiment_trend(recent_dates)
 
-        report = _build_report(indices, stats, top_s, bot_s, prev_amount, zt_groups)
+        zt_stocks = _fetch_limit_up(trade_date)
+        zt_groups = _group_limit_up_by_industry(zt_stocks) if zt_stocks else []
+
+        report = _build_report(
+            indices, stats, top_s, bot_s, prev_amount, zt_groups,
+            sentiment_trend=sentiment_trend, zt_stocks=zt_stocks,
+        )
 
         # 保存到文件
         date_str = datetime.now().strftime('%Y%m%d')
@@ -824,14 +840,25 @@ def run_market_review(
         )
         logger.info(f"复盘报告已保存: {filepath}")
 
-        # 推送
+        # 推送（分段：行情+板块 / 涨停分析）
         if merge_notification and send_notification:
             logger.info("合并推送模式：跳过单独推送")
         elif send_notification and notifier.is_available():
-            if notifier.send(report, email_send_to_all=True):
-                logger.info("大盘复盘推送成功")
+            split_marker = "\n### 四、涨停分析"
+            if split_marker in report:
+                part1, part2 = report.split(split_marker, 1)
+                ok1 = notifier.send(part1.strip(), email_send_to_all=True)
+                time.sleep(1)
+                ok2 = notifier.send("### 四、涨停分析\n" + part2.strip(), email_send_to_all=False)
+                if ok1 and ok2:
+                    logger.info("大盘复盘分段推送成功（2条）")
+                else:
+                    logger.warning("大盘复盘分段推送部分失败")
             else:
-                logger.warning("大盘复盘推送失败")
+                if notifier.send(report, email_send_to_all=True):
+                    logger.info("大盘复盘推送成功")
+                else:
+                    logger.warning("大盘复盘推送失败")
         elif not send_notification:
             logger.info("已跳过推送 (--no-notify)")
 

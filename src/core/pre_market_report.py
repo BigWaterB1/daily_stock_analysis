@@ -151,7 +151,7 @@ def _fetch_commodities() -> list[dict]:
     hf_OIL 格式：最新价,,开盘,买价,最高,最低,时间,昨收,...,名称,成交量
     美元指数：Yahoo Finance DX-Y.NYB
     """
-    codes = ['hf_XAU', 'hf_OIL']
+    codes = ['hf_XAU', 'hf_OIL', 'hf_HSI', 'fx_susdcnh']
     data = _sina_quote(codes)
     results = []
 
@@ -181,6 +181,35 @@ def _fetch_commodities() -> list[dict]:
     usd = _fetch_usd_index()
     if usd:
         results.append(usd)
+
+    # 恒生指数（hf_HSI：fields[0]=最新, fields[7]=昨收）
+    f = data.get('hf_HSI', [])
+    if not f:
+        f = _sina_quote(['hf_HSI']).get('hf_HSI', [])
+    if len(f) >= 8:
+        try:
+            price = float(f[0])
+            prev  = float(f[7])
+            pct   = (price - prev) / prev * 100 if prev else 0
+            results.append({'name': '恒生指数', 'price': price, 'prev': prev, 'pct': round(pct, 2), 'unit': '点'})
+        except (ValueError, IndexError):
+            pass
+
+    # 离岸人民币（fx_susdcnh：fields[1]=bid, fields[2]=ask）
+    f = data.get('fx_susdcnh', [])
+    if not f:
+        f = _sina_quote(['fx_susdcnh']).get('fx_susdcnh', [])
+    if len(f) >= 3:
+        try:
+            price = (float(f[1]) + float(f[2])) / 2   # mid price
+            # 用 fields[10] 作为涨跌额估算（若可用）
+            change_amt = float(f[10]) if len(f) > 10 and f[10] else 0
+            prev = price - change_amt if change_amt else 0
+            pct  = change_amt / prev * 100 if prev else 0
+            # 注意：USDCNH 上涨 = 人民币贬值，对 A 股偏负面；颜色反转
+            results.append({'name': '离岸人民币', 'price': round(price, 4), 'prev': round(prev, 4), 'pct': round(-pct, 2), 'unit': 'USD/CNH'})
+        except (ValueError, IndexError):
+            pass
 
     return results
 
@@ -229,14 +258,14 @@ def _build_pre_market_report(
     else:
         lines.append("_板块数据暂不可用_\n")
 
-    # ── 三、大宗商品 ─────────────────────────────
-    lines.append("### 三、大宗商品\n")
+    # ── 三、大宗商品 & 港股汇率 ──────────────────────
+    lines.append("### 三、大宗商品 & 港股汇率\n")
     if commodities:
         for c in commodities:
             unit = f"　{c['unit']}" if c['unit'] else ""
             pct_str = f"{c['pct']:+.2f}%"
             lines.append(
-                f"**{c['name']}**　{c['price']:,.2f}{unit}　"
+                f"**{c['name']}**　{c['price']:,g}{unit}　"
                 + _c(pct_str, c['pct'])
             )
         lines.append("")
