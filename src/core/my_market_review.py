@@ -525,6 +525,60 @@ def _fetch_concept_events() -> str:
         return ""
 
 
+def _fetch_stock_concepts(stock_names: list[str]) -> dict[str, list[str]]:
+    """
+    通过东财概念板块成分股接口，反向查每只涨停股所属的热门概念。
+    只抓今日涨幅前 40 概念板块的成分股，并发请求，失败静默跳过。
+    返回 {股票名: [概念名, ...]} 映射。
+    """
+    import akshare as ak
+    import pandas as pd
+
+    stock_to_concepts: dict[str, list[str]] = {n: [] for n in stock_names}
+    name_set = set(stock_names)
+
+    # 获取今日热门概念板块列表
+    concept_names = []
+    try:
+        df_spot = ak.stock_board_concept_spot_em()
+        if df_spot is not None and not df_spot.empty:
+            top = df_spot.nlargest(40, '涨跌幅')
+            concept_names = top['板块名称'].tolist()
+    except Exception as e:
+        logger.debug(f"[概念板块] 东财列表获取失败: {e}")
+
+    if not concept_names:
+        return stock_to_concepts
+
+    def fetch_cons(concept: str) -> tuple[str, list[str]]:
+        try:
+            df = ak.stock_board_concept_cons_em(symbol=concept)
+            if df is None or df.empty:
+                return concept, []
+            name_col = next((c for c in ['名称', '股票名称'] if c in df.columns), None)
+            if not name_col:
+                return concept, []
+            return concept, [str(n) for n in df[name_col] if str(n) in name_set]
+        except Exception:
+            return concept, []
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(fetch_cons, c): c for c in concept_names}
+            for future in as_completed(futures, timeout=20):
+                try:
+                    concept, members = future.result(timeout=5)
+                    for m in members:
+                        if concept not in stock_to_concepts[m]:
+                            stock_to_concepts[m].append(concept)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug(f"[概念板块] 并发获取超时: {e}")
+
+    return stock_to_concepts
+
+
 def _group_limit_up_by_ai(stocks: list[dict], analyzer) -> list[dict]:
     """
     调用 LLM 对涨停股进行主题分类。
@@ -553,25 +607,34 @@ def _group_limit_up_by_ai(stocks: list[dict], analyzer) -> list[dict]:
     # ── 构建 prompt ──────────────────────────────
     concept_bg = _fetch_concept_events()
 
+    # 尝试获取每只股票所属热门概念（东财接口，本机代理可能失败，Actions上可用）
+    stock_names = [s['name'] for s in stocks]
+    stock_concepts = _fetch_stock_concepts(stock_names)
+
     stock_lines = []
     for s in stocks:
-        lb   = f"，{s['lianban']}连板" if s['lianban'] > 1 else ""
-        rsn  = f"，理由：{s['reason']}" if s['reason'] else ""
-        stock_lines.append(f"- {s['name']}（{s['industry']}{lb}{rsn}）")
+        lb      = f"，{s['lianban']}连板" if s['lianban'] > 1 else ""
+        rsn     = f"，强势理由：{s['reason']}" if s['reason'] else ""
+        concepts = stock_concepts.get(s['name'], [])
+        cpt     = f"，所属概念：{'、'.join(concepts[:3])}" if concepts else ""
+        stock_lines.append(f"- {s['name']}（行业：{s['industry']}{cpt}{lb}{rsn}）")
 
-    prompt = f"""以下是今日A股涨停股票列表（含所属行业和技术理由）：
+    prompt = f"""你是A股市场分析师，擅长识别个股涨停背后的真实题材原因。
 
+今日涨停股票（格式：股票名（所属行业，连板数，强势股入选理由））：
 {chr(10).join(stock_lines)}
 
-以下是近期同花顺热门概念板块的驱动事件，可作为分类参考：
+近期同花顺热门概念板块及驱动事件（用于判断市场主线题材）：
 {concept_bg if concept_bg else '（无数据）'}
 
-请根据涨停的**实际主题原因**（政策催化、行业景气、事件驱动等），将上述股票归类为若干主题组。
-严格要求：
-1. 每只股票只能出现在一个组中，不得重复
-2. 每组用简短主题名命名（不超过8字），反映真实共同原因（如"医疗设备国产替代"、"军工订单"、"消费电子复苏"）
-3. 无法归入明确主题的股票统一放"其他"组
-4. 只返回 JSON 数组，不要有任何其他文字：
+任务：根据你对A股市场的了解，结合上述概念驱动事件，推断每只股票的**真实涨停题材**，并将股票按题材分组。
+
+注意：
+- 股票的"所属行业"是其主营业务分类，不一定等于涨停原因（例如生产航天零件的塑料厂可能因"商业航天"概念涨停）
+- 优先用概念/政策/事件命名主题（如"商业航天"、"创新药出海"、"电网改造"），而非行业名
+- 相同题材合并为一组，主题名不超过8字
+- 每只股票只属于一个组，无明确题材的归入"其他"
+- 只返回 JSON，不要有任何其他文字：
 [
   {{"group": "主题名", "stocks": ["股票名1", "股票名2"]}},
   ...
