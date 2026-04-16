@@ -25,7 +25,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check trading day
+        id: check
+        run: |
+          python - <<'EOF'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          from src.core.trading_calendar import is_market_open
+          today = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+          is_trading = is_market_open('cn', today)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"is_trading={'true' if is_trading else 'false'}\n")
+          print(f"今日 {today} {'是' if is_trading else '非'} A 股交易日")
+          EOF
+
       - name: Run market review
+        if: steps.check.outputs.is_trading == 'true'
         env:
           # 飞书
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
