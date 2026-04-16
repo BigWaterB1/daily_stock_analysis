@@ -503,31 +503,122 @@ def _fetch_limit_up(trade_date: str) -> list[dict]:
     return stocks
 
 
-def _group_limit_up(stocks: list[dict]) -> list[dict]:
+def _fetch_concept_events() -> str:
     """
-    将涨停股按行业分组，组内按连板数降序排列。
-    每组选取最具代表性的名称：若同行业里有多只同概念的则用行业名，
-    否则直接用行业名。
+    获取同花顺近期概念板块驱动事件，作为 AI 分类的背景参考。
+    返回格式化的文本，供 prompt 使用。
+    """
+    import akshare as ak
+    try:
+        df = ak.stock_board_concept_summary_ths()
+        if df is None or df.empty:
+            return ""
+        lines = []
+        for _, row in df.head(40).iterrows():
+            name  = str(row.get('概念名称', '') or '').strip()
+            event = str(row.get('驱动事件', '') or '').strip()
+            if name and event:
+                lines.append(f"- {name}：{event}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"[概念驱动事件] 获取失败: {e}")
+        return ""
+
+
+def _group_limit_up_by_ai(stocks: list[dict], analyzer) -> list[dict]:
+    """
+    调用 LLM 对涨停股进行主题分类。
+    analyzer: GeminiAnalyzer 实例（需 is_available()）
     返回 list[dict]：group_name, count, stocks（已排序）
-    按 count 降序。
+    AI 失败时自动回退到行业分组。
     """
+    import json
     from collections import defaultdict
-    groups: dict[str, list[dict]] = defaultdict(list)
+
+    # ── 回退：按行业分组 ──────────────────────────
+    def _fallback() -> list[dict]:
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for s in stocks:
+            groups[s['industry'] or '其他'].append(s)
+        result = []
+        for gname, members in groups.items():
+            members.sort(key=lambda x: x['lianban'], reverse=True)
+            result.append({'group_name': gname, 'count': len(members), 'stocks': members})
+        result.sort(key=lambda x: x['count'], reverse=True)
+        return result
+
+    if not analyzer or not analyzer.is_available():
+        return _fallback()
+
+    # ── 构建 prompt ──────────────────────────────
+    concept_bg = _fetch_concept_events()
+
+    stock_lines = []
     for s in stocks:
-        key = s['industry'] if s['industry'] else '其他'
-        groups[key].append(s)
+        lb   = f"，{s['lianban']}连板" if s['lianban'] > 1 else ""
+        rsn  = f"，理由：{s['reason']}" if s['reason'] else ""
+        stock_lines.append(f"- {s['name']}（{s['industry']}{lb}{rsn}）")
 
-    result = []
-    for group_name, members in groups.items():
-        members.sort(key=lambda x: x['lianban'], reverse=True)
-        result.append({
-            'group_name': group_name,
-            'count': len(members),
-            'stocks': members,
-        })
+    prompt = f"""以下是今日A股涨停股票列表（含所属行业和技术理由）：
 
-    result.sort(key=lambda x: x['count'], reverse=True)
-    return result
+{chr(10).join(stock_lines)}
+
+以下是近期同花顺热门概念板块的驱动事件，可作为分类参考：
+{concept_bg if concept_bg else '（无数据）'}
+
+请根据涨停的**实际主题原因**（政策催化、行业景气、事件驱动等），将上述股票归类为若干主题组。
+严格要求：
+1. 每只股票只能出现在一个组中，不得重复
+2. 每组用简短主题名命名（不超过8字），反映真实共同原因（如"医疗设备国产替代"、"军工订单"、"消费电子复苏"）
+3. 无法归入明确主题的股票统一放"其他"组
+4. 只返回 JSON 数组，不要有任何其他文字：
+[
+  {{"group": "主题名", "stocks": ["股票名1", "股票名2"]}},
+  ...
+]"""
+
+    try:
+        resp = analyzer.generate_text(prompt, max_tokens=1500, temperature=0.3)
+        if not resp:
+            raise ValueError("LLM 返回空")
+
+        # 提取 JSON（可能被 markdown 代码块包裹）
+        text = resp.strip()
+        if '```' in text:
+            text = text.split('```')[1]
+            if text.startswith('json'):
+                text = text[4:]
+        groups_raw = json.loads(text.strip())
+
+        # 构建 name -> stock dict 方便查找
+        name_to_stock = {s['name']: s for s in stocks}
+        result = []
+        matched = set()
+        for g in groups_raw:
+            gname   = str(g.get('group', '其他')).strip()
+            members = []
+            for sname in g.get('stocks', []):
+                sname = str(sname).strip()
+                if sname in name_to_stock and sname not in matched:  # 防重复
+                    members.append(name_to_stock[sname])
+                    matched.add(sname)
+            if members:
+                members.sort(key=lambda x: x['lianban'], reverse=True)
+                result.append({'group_name': gname, 'count': len(members), 'stocks': members})
+
+        # 未被 AI 覆盖的股票放入"其他"
+        unmatched = [s for s in stocks if s['name'] not in matched]
+        if unmatched:
+            unmatched.sort(key=lambda x: x['lianban'], reverse=True)
+            result.append({'group_name': '其他', 'count': len(unmatched), 'stocks': unmatched})
+
+        result.sort(key=lambda x: x['count'], reverse=True)
+        logger.info(f"[涨停AI分类] 共 {len(result)} 个主题")
+        return result
+
+    except Exception as e:
+        logger.warning(f"[涨停AI分类] 失败，回退行业分组: {e}")
+        return _fallback()
 
 
 def _build_report(
@@ -658,7 +749,7 @@ def run_market_review(
 
         trade_date = _get_last_trading_date().replace('-', '')
         zt_stocks   = _fetch_limit_up(trade_date)
-        zt_groups   = _group_limit_up(zt_stocks) if zt_stocks else []
+        zt_groups   = _group_limit_up_by_ai(zt_stocks, analyzer) if zt_stocks else []
 
         report = _build_report(indices, stats, top_s, bot_s, prev_amount, zt_groups)
 
