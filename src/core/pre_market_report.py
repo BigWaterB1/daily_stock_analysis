@@ -124,15 +124,34 @@ def _fetch_us_sectors() -> list[dict]:
     return results
 
 
+def _fetch_usd_index() -> Optional[dict]:
+    """
+    通过 Yahoo Finance 获取美元指数（DXY）。
+    新浪 gb_usdx 实际是某支 ETF，数据不正确，改用 Yahoo。
+    """
+    try:
+        url = 'https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=5d'
+        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=8)
+        result = r.json()['chart']['result'][0]
+        meta = result['meta']
+        price = float(meta['regularMarketPrice'])
+        prev  = float(meta.get('chartPreviousClose') or 0)
+        pct   = (price - prev) / prev * 100 if prev else 0
+        return {'name': '美元指数', 'price': price, 'prev': prev, 'pct': round(pct, 2), 'unit': ''}
+    except Exception as e:
+        logger.warning(f"[Yahoo] 美元指数获取失败: {e}")
+        return None
+
+
 def _fetch_commodities() -> list[dict]:
     """
     获取现货黄金(XAU)、布伦特原油、美元指数。
 
     hf_XAU 格式：最新价,昨收,最新价2,买价,最高,最低,时间,...,名称
     hf_OIL 格式：最新价,,开盘,买价,最高,最低,时间,昨收,...,名称,成交量
-    gb_usdx 格式：名称,最新,涨跌幅%,时间,...
+    美元指数：Yahoo Finance DX-Y.NYB
     """
-    codes = ['hf_XAU', 'hf_OIL', 'gb_usdx']
+    codes = ['hf_XAU', 'hf_OIL']
     data = _sina_quote(codes)
     results = []
 
@@ -158,15 +177,10 @@ def _fetch_commodities() -> list[dict]:
         except (ValueError, IndexError):
             pass
 
-    # 美元指数（gb_usdx）
-    f = data.get('gb_usdx', [])
-    if len(f) >= 3:
-        try:
-            price = float(f[1])
-            pct   = float(f[2])
-            results.append({'name': '美元指数', 'price': price, 'prev': None, 'pct': pct, 'unit': ''})
-        except (ValueError, IndexError):
-            pass
+    # 美元指数（Yahoo Finance）
+    usd = _fetch_usd_index()
+    if usd:
+        results.append(usd)
 
     return results
 
