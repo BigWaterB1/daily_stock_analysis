@@ -215,12 +215,6 @@ class FeishuSender:
             "msg_type": "interactive",
             "card": {
                 "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {
-                        "tag": "plain_text",
-                        "content": "A股智能分析报告"
-                    }
-                },
                 "elements": [
                     {
                         "tag": "div",

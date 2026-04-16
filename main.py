@@ -414,7 +414,8 @@ def run_full_analysis(
     """
     # Import pipeline modules outside the broad try/except so that import-time
     # failures propagate to the caller instead of being silently swallowed.
-    from src.core.market_review import run_market_review
+    # from src.core.market_review import run_market_review  # 原始大盘复盘（已注释）
+    from src.core.my_market_review import run_market_review  # 我的个性化大盘复盘
     from src.core.pipeline import StockAnalysisPipeline
 
     try:
@@ -822,7 +823,8 @@ def main() -> int:
         # 模式1: 仅大盘复盘
         if args.market_review:
             from src.analyzer import GeminiAnalyzer
-            from src.core.market_review import run_market_review
+            # from src.core.market_review import run_market_review  # 原始大盘复盘（已注释）
+            from src.core.my_market_review import run_market_review  # 我的个性化大盘复盘
             from src.notification import NotificationService
             from src.search_service import SearchService
 
