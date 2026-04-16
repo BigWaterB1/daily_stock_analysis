@@ -654,7 +654,7 @@ def _fetch_jike_reasons() -> dict[str, str]:
     import re
     try:
         resp = requests.get(
-            'http://www.jikefupan.com/zrzt',
+            'http://www.jikefupan.com/',
             headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'http://www.jikefupan.com/'},
             timeout=10,
         )
