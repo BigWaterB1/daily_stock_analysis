@@ -54,14 +54,20 @@ INDEX_MAP = {
 def _get_last_trading_date() -> str:
     """
     返回最近已收盘交易日的日期字符串（YYYY-MM-DD）。
-    规则：若当前时间 < 15:00（A股收盘时间），则今日数据未就绪，取上一交易日。
+    规则：若北京时间 < 15:00，则今日数据未就绪，取上一交易日。
+    始终使用 Asia/Shanghai 时区，避免 GitHub Actions (UTC) 环境误判。
     使用新浪交易日历；失败时用工作日近似（不含节假日修正）。
     """
     import akshare as ak
     import pandas as pd
     from datetime import datetime, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
 
-    now = datetime.now()
+    tz_sh = ZoneInfo('Asia/Shanghai')
+    now = datetime.now(tz_sh)
     # 15:00 前认为当日数据尚未完整，使用前一交易日
     cutoff = now.replace(hour=15, minute=0, second=0, microsecond=0)
     ref_date = now.date() if now >= cutoff else now.date() - timedelta(days=1)
