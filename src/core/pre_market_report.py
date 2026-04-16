@@ -80,21 +80,21 @@ def _sina_quote(codes: list[str]) -> dict[str, list[str]]:
 def _fetch_us_indices() -> list[dict]:
     """
     获取美股三大指数。
-    新浪格式：名称,最新价,涨跌点,涨跌幅%
+    新浪 gb_* 格式：名称,最新价,涨跌幅%,时间,涨跌点,开盘,...
     """
-    codes = ['int_dji', 'int_nasdaq', 'int_sp500']
-    display = {'int_dji': '道琼斯', 'int_nasdaq': '纳斯达克', 'int_sp500': '标普500'}
+    codes = ['gb_dji', 'gb_ixic', 'gb_inx']
+    display = {'gb_dji': '道琼斯', 'gb_ixic': '纳斯达克', 'gb_inx': '标普500'}
     data = _sina_quote(codes)
     results = []
     for code in codes:
         fields = data.get(code, [])
-        if len(fields) < 4:
+        if len(fields) < 5:
             continue
         try:
-            name    = display.get(code, fields[0])
-            price   = float(fields[1])
-            change  = float(fields[2])   # 涨跌点
-            pct     = float(fields[3])   # 涨跌幅%
+            name   = display.get(code, fields[0])
+            price  = float(fields[1])
+            pct    = float(fields[2])   # 涨跌幅%
+            change = float(fields[4])   # 涨跌点
             results.append({'name': name, 'price': price, 'change': change, 'pct': pct})
         except (ValueError, IndexError):
             continue
