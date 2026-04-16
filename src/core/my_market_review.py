@@ -646,45 +646,46 @@ def _fetch_sentiment_trend(trade_dates: list[str]) -> list[int]:
     return counts
 
 
-# 主题关键词映射（优先级从高到低，先匹配先返回）
-_THEME_KEYWORDS: list[tuple[list[str], str]] = [
-    (['AI', '人工智能', '大模型', 'DeepSeek', 'deepseek', '算力', '智能驾驶', '机器视觉', 'LLM'], 'AI/大模型'),
-    (['机器人', '人形机器人', '工业机器人', '具身智能'], '机器人'),
-    (['半导体', '芯片', '存储', '封装', '晶圆', '集成电路', 'EDA', '光刻'], '半导体/芯片'),
-    (['新能源', '锂电', '光伏', '储能', '钠电', '固态电池', '电池'], '新能源'),
-    (['军工', '国防', '航空', '航天', '兵器', '军民融合'], '军工国防'),
-    (['医药', '创新药', '生物', '医疗', 'CXO', '基因', '疫苗', '制药'], '医疗健康'),
-    (['出口', '贸易', '跨境', '关税', '海外', '美国市场'], '出口贸易'),
-    (['地产', '房地产', '建筑', '建材', '装修', '物业'], '地产链'),
-    (['金融', '银行', '券商', '保险', '期货', '信托'], '金融'),
-    (['消费', '零售', '品牌', '食品', '饮料', '白酒', '服装'], '消费'),
-    (['传媒', '影视', '游戏', '文娱', '短视频'], '传媒娱乐'),
-    (['农业', '种子', '养殖', '粮食', '化肥', '农药'], '农业'),
-    (['重组', '并购', '控股', '收购', '整合'], '重组并购'),
-    (['连板', '连续涨停', '强势', '龙头'], '连板效应'),
-]
-
-
-def _extract_theme_tag(reason: str, industry: str) -> str:
-    """从涨停原因文本和行业中提取主题标签，无匹配则返回行业名。"""
-    text = (reason or '') + ' ' + (industry or '')
-    for keywords, tag in _THEME_KEYWORDS:
-        for kw in keywords:
-            if kw in text:
-                return tag
-    return industry or '其他'
-
-
-def _group_limit_up_by_reason(stocks: list[dict]) -> list[dict]:
+def _fetch_jike_reasons() -> dict[str, str]:
     """
-    按涨停原因关键词对涨停股分组，替代行业分组。
-    优先从强势股池的「入选理由」提取主题，无理由时回退到所属行业。
+    从极客复盘(jikefupan.com/zrzt)抓取涨停原因。
+    返回 {股票代码: 涨停原因} dict，失败时返回空 dict。
     """
+    import re
+    try:
+        resp = requests.get(
+            'http://www.jikefupan.com/zrzt',
+            headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'http://www.jikefupan.com/'},
+            timeout=10,
+        )
+        resp.encoding = 'utf-8'
+        html = resp.text
+        rows = re.findall(r'<tr>(.*?)</tr>', html, re.DOTALL)
+        result: dict[str, str] = {}
+        for row in rows:
+            if 'text-red' not in row:
+                continue
+            tds = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+            if len(tds) < 13:
+                continue
+            code = re.sub(r'<[^>]+>', '', tds[0]).strip()
+            reason = re.sub(r'<[^>]+>', '', tds[12]).strip()
+            reason = re.sub(r'\s+', ' ', reason)
+            if code and reason:
+                result[code] = reason
+        logger.debug(f"[极客复盘] 获取到 {len(result)} 条涨停原因")
+        return result
+    except Exception as e:
+        logger.warning(f"[极客复盘] 涨停原因获取失败: {e}")
+        return {}
+
+
+def _group_limit_up_by_industry(stocks: list[dict]) -> list[dict]:
+    """按东财所属行业对涨停股分组，组内按连板数降序。"""
     from collections import defaultdict
     groups: dict[str, list[dict]] = defaultdict(list)
     for s in stocks:
-        tag = _extract_theme_tag(s.get('reason', ''), s.get('industry', ''))
-        groups[tag].append(s)
+        groups[s['industry'] or '其他'].append(s)
     result = []
     for gname, members in groups.items():
         members.sort(key=lambda x: x['lianban'], reverse=True)
@@ -730,64 +731,59 @@ def _build_report(
             diff = stats['total_amount'] - prev_amount
             diff_pct = diff / prev_amount * 100
             sign = '+' if diff >= 0 else ''
-            amt_cmp = f"（较上日 {_c(f'{diff_pct:+.1f}%，{sign}{int(diff)} 亿', diff)}）"
+            amt_cmp = f"\n较上日 {_c(f'{diff_pct:+.1f}%，{sign}{int(diff)}亿', diff)}"
         lines.append(
-            f"上涨 **{stats['up_count']}** 家 / "
-            f"下跌 **{stats['down_count']}** 家 / "
-            f"平盘 **{stats['flat_count']}** 家 | "
-            f"涨停 **{stats['limit_up_count']}** / "
-            f"跌停 **{stats['limit_down_count']}** | "
-            f"成交额 **{today_amt}** 亿{amt_cmp}"
+            f"↑{stats['up_count']} ↓{stats['down_count']} ={stats['flat_count']} "
+            f"| 涨停 **{stats['limit_up_count']}** 跌停 {stats['limit_down_count']}"
         )
-        # 情绪指数：近5日涨停趋势
+        lines.append(f"成交额 **{today_amt}亿**{amt_cmp}")
         if sentiment_trend and len(sentiment_trend) >= 2:
-            arrows = " → ".join(str(x) for x in sentiment_trend[:-1])
-            trend_str = f"{arrows} → **{sentiment_trend[-1]}**"
-            lines.append(f"情绪追踪（近{len(sentiment_trend)}日涨停）：{trend_str}")
+            arrows = "→".join(str(x) for x in sentiment_trend[:-1])
+            trend_str = f"{arrows}→**{sentiment_trend[-1]}**"
+            lines.append(f"情绪（近{len(sentiment_trend)}日涨停）：{trend_str}")
         lines.append("")
     else:
         lines.append("_市场统计数据暂不可用_\n")
 
     # ── 第二部分：指数 ───────────────────────────
-    lines.append("\n### 二、指数行情\n")
+    lines.append("### 二、指数行情\n")
     if indices:
         for idx in indices:
             pct = idx['change_pct']
-            amt_str = f"{int(idx['amount_yi'])} 亿" if idx['amount_yi'] > 0 else "-"
+            amt_str = f"{int(idx['amount_yi'])}亿" if idx['amount_yi'] > 0 else "-"
             trend = ""
             if idx['name'] == '上证指数' and idx.get('prev_close') and idx.get('open'):
                 lbl = _trend_label(idx['open'], idx['high'], idx['low'], idx['current'], idx['prev_close'])
                 if lbl:
-                    trend = f"　{lbl}"
+                    trend = f" {lbl}"
             lines.append(
-                f"**{idx['name']}**　{idx['current']:.2f}　"
-                f"{_c(f'{pct:+.2f}%', pct)}　{amt_str}{trend}"
+                f"**{idx['name']}** {idx['current']:.2f} "
+                f"{_c(f'{pct:+.2f}%', pct)} {amt_str}{trend}"
             )
         lines.append("")
     else:
         lines.append("_指数数据暂不可用_\n")
 
     # ── 第三部分：同花顺行业板块 ────────────────────
-    lines.append("\n### 三、同花顺行业板块\n")
+    lines.append("### 三、同花顺行业板块\n")
 
     def _render_sector_block(sectors: list[dict]) -> list[str]:
         block = []
         for i, s in enumerate(sectors, 1):
             pct = s['change_pct']
-            line = f"{i:>2}. **{_esc(s['name'])}** {_c(f'{pct:+.2f}%', pct)}"
+            # 取一只领涨/领跌股（手机窄屏：板块名+幅度+1只代表股，紧凑单行）
+            rep_name, rep_pct = '', None
             stocks = s.get('top_stocks', [])
             if stocks:
-                parts = []
-                for st in stocks:
-                    sp = st['change_pct']
-                    parts.append(f"{_esc(st['name'])} {_c(f'{sp:+.1f}%', sp)}")
-                line += "　|　" + "　".join(parts)
+                rep_name = _esc(stocks[0]['name'])
+                rep_pct  = stocks[0]['change_pct']
             else:
                 nm = s.get('leading_gainer', '')
                 p  = s.get('leading_gainer_pct')
                 if nm and p is not None:
-                    line += f"　|　{_esc(nm)} {_c(f'{p:+.1f}%', p)}"
-            block.append(line)
+                    rep_name, rep_pct = _esc(nm), p
+            rep_str = f" {rep_name} {_c(f'{rep_pct:+.1f}%', rep_pct)}" if rep_name and rep_pct is not None else ""
+            block.append(f"{i:>2}. **{_esc(s['name'])}** {_c(f'{pct:+.2f}%', pct)}{rep_str}")
         return block
 
     if top_sectors:
@@ -804,25 +800,21 @@ def _build_report(
         lines.append("_板块数据暂不可用_\n")
 
     # ── 第四部分：涨停分析 ───────────────────────
-    lines.append("\n### 四、涨停分析\n")
+    lines.append("### 四、涨停分析\n")
     if zt_stocks:
-        total_zt = len(zt_stocks)
-        # 连板梯队
         lines.append("**连板梯队**\n")
         lines.append(_build_lianban_ladder(zt_stocks))
         lines.append("")
 
     if limit_up_groups:
         total_zt = sum(g['count'] for g in limit_up_groups)
-        lines.append(f"共 **{total_zt}** 只涨停，按主题分布：\n")
+        lines.append(f"共 **{total_zt}** 只涨停，按行业分布：\n")
         for g in limit_up_groups:
             lines.append(f"**{_esc(g['group_name'])}**（{g['count']}只）")
             for s in g['stocks']:
                 lb = f" {s['lianban']}连板" if s['lianban'] > 1 else ""
-                reason = f" _{_esc(s['reason'])}_" if s['reason'] else ""
-                lines.append(
-                    f"　{_esc(s['name'])}　换手 {s['turnover']:.1f}%{lb}{reason}"
-                )
+                reason = f" [{_esc(s['reason'])}]" if s['reason'] else ""
+                lines.append(f"　{_esc(s['name'])} 换手{s['turnover']:.1f}%{lb}{reason}")
             lines.append("")
     elif not zt_stocks:
         lines.append("_涨停数据暂不可用_\n")
@@ -858,7 +850,12 @@ def run_market_review(
         sentiment_trend = _fetch_sentiment_trend(recent_dates)
 
         zt_stocks = _fetch_limit_up(trade_date)
-        zt_groups = _group_limit_up_by_reason(zt_stocks) if zt_stocks else []
+        # 合并极客复盘的涨停原因（比强势股池更全面）
+        jike_reasons = _fetch_jike_reasons()
+        for s in zt_stocks:
+            if jike_reasons.get(s['code']):
+                s['reason'] = jike_reasons[s['code']]
+        zt_groups = _group_limit_up_by_industry(zt_stocks) if zt_stocks else []
 
         report = _build_report(
             indices, stats, top_s, bot_s, prev_amount, zt_groups,
