@@ -646,12 +646,45 @@ def _fetch_sentiment_trend(trade_dates: list[str]) -> list[int]:
     return counts
 
 
-def _group_limit_up_by_industry(stocks: list[dict]) -> list[dict]:
-    """按东财板块对涨停股分组（stock_zt_pool_em 的所属行业字段），按组内数量降序排列。"""
+# 主题关键词映射（优先级从高到低，先匹配先返回）
+_THEME_KEYWORDS: list[tuple[list[str], str]] = [
+    (['AI', '人工智能', '大模型', 'DeepSeek', 'deepseek', '算力', '智能驾驶', '机器视觉', 'LLM'], 'AI/大模型'),
+    (['机器人', '人形机器人', '工业机器人', '具身智能'], '机器人'),
+    (['半导体', '芯片', '存储', '封装', '晶圆', '集成电路', 'EDA', '光刻'], '半导体/芯片'),
+    (['新能源', '锂电', '光伏', '储能', '钠电', '固态电池', '电池'], '新能源'),
+    (['军工', '国防', '航空', '航天', '兵器', '军民融合'], '军工国防'),
+    (['医药', '创新药', '生物', '医疗', 'CXO', '基因', '疫苗', '制药'], '医疗健康'),
+    (['出口', '贸易', '跨境', '关税', '海外', '美国市场'], '出口贸易'),
+    (['地产', '房地产', '建筑', '建材', '装修', '物业'], '地产链'),
+    (['金融', '银行', '券商', '保险', '期货', '信托'], '金融'),
+    (['消费', '零售', '品牌', '食品', '饮料', '白酒', '服装'], '消费'),
+    (['传媒', '影视', '游戏', '文娱', '短视频'], '传媒娱乐'),
+    (['农业', '种子', '养殖', '粮食', '化肥', '农药'], '农业'),
+    (['重组', '并购', '控股', '收购', '整合'], '重组并购'),
+    (['连板', '连续涨停', '强势', '龙头'], '连板效应'),
+]
+
+
+def _extract_theme_tag(reason: str, industry: str) -> str:
+    """从涨停原因文本和行业中提取主题标签，无匹配则返回行业名。"""
+    text = (reason or '') + ' ' + (industry or '')
+    for keywords, tag in _THEME_KEYWORDS:
+        for kw in keywords:
+            if kw in text:
+                return tag
+    return industry or '其他'
+
+
+def _group_limit_up_by_reason(stocks: list[dict]) -> list[dict]:
+    """
+    按涨停原因关键词对涨停股分组，替代行业分组。
+    优先从强势股池的「入选理由」提取主题，无理由时回退到所属行业。
+    """
     from collections import defaultdict
     groups: dict[str, list[dict]] = defaultdict(list)
     for s in stocks:
-        groups[s['industry'] or '其他'].append(s)
+        tag = _extract_theme_tag(s.get('reason', ''), s.get('industry', ''))
+        groups[tag].append(s)
     result = []
     for gname, members in groups.items():
         members.sort(key=lambda x: x['lianban'], reverse=True)
@@ -781,7 +814,7 @@ def _build_report(
 
     if limit_up_groups:
         total_zt = sum(g['count'] for g in limit_up_groups)
-        lines.append(f"共 **{total_zt}** 只涨停，按板块分布：\n")
+        lines.append(f"共 **{total_zt}** 只涨停，按主题分布：\n")
         for g in limit_up_groups:
             lines.append(f"**{_esc(g['group_name'])}**（{g['count']}只）")
             for s in g['stocks']:
@@ -825,7 +858,7 @@ def run_market_review(
         sentiment_trend = _fetch_sentiment_trend(recent_dates)
 
         zt_stocks = _fetch_limit_up(trade_date)
-        zt_groups = _group_limit_up_by_industry(zt_stocks) if zt_stocks else []
+        zt_groups = _group_limit_up_by_reason(zt_stocks) if zt_stocks else []
 
         report = _build_report(
             indices, stats, top_s, bot_s, prev_amount, zt_groups,
