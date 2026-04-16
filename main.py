@@ -281,6 +281,12 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--pre-market',
+        action='store_true',
+        help='仅运行开盘前晨报（美股指数/板块/大宗商品）'
+    )
+
+    parser.add_argument(
         '--force-run',
         action='store_true',
         help='跳过交易日检查，强制执行全量分析（Issue #373）'
@@ -818,6 +824,16 @@ def main() -> int:
                 f"回测完成: processed={stats.get('processed')} saved={stats.get('saved')} "
                 f"completed={stats.get('completed')} insufficient={stats.get('insufficient')} errors={stats.get('errors')}"
             )
+            return 0
+
+        # 模式1a: 开盘前晨报
+        if args.pre_market:
+            from src.core.pre_market_report import run_pre_market_report
+            from src.notification import NotificationService
+
+            logger.info("模式: 开盘前晨报")
+            notifier = NotificationService()
+            run_pre_market_report(notifier=notifier, send_notification=not args.no_notify)
             return 0
 
         # 模式1: 仅大盘复盘

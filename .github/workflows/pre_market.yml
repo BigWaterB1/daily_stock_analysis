@@ -1,0 +1,60 @@
+name: 开盘前晨报推送
+
+on:
+  schedule:
+    # 每个工作日 09:00 触发（UTC+8 = UTC 01:00）
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  pre-market-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check trading day
+        id: check
+        run: |
+          python - <<'EOF'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          from src.core.trading_calendar import is_market_open
+          today = datetime.now(ZoneInfo('Asia/Shanghai')).date()
+          is_trading = is_market_open('cn', today)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"is_trading={'true' if is_trading else 'false'}\n")
+          print(f"今日 {today} {'是' if is_trading else '非'} A 股交易日")
+          EOF
+
+      - name: Run pre-market report
+        if: steps.check.outputs.is_trading == 'true'
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          LLM_CHANNELS: ${{ secrets.LLM_CHANNELS }}
+          LLM_ZHIPU_API_KEY: ${{ secrets.LLM_ZHIPU_API_KEY }}
+          LLM_ZHIPU_BASE_URL: ${{ secrets.LLM_ZHIPU_BASE_URL }}
+          LLM_ZHIPU_MODELS: ${{ secrets.LLM_ZHIPU_MODELS }}
+          LLM_ZHIPU_PROTOCOL: openai
+          LITELLM_MODEL: openai/glm-4-flash
+          RUN_IMMEDIATELY: "true"
+          SCHEDULE_ENABLED: "false"
+          MARKET_REVIEW_ENABLED: "false"
+          TRADING_DAY_CHECK_ENABLED: "false"
+          LOG_LEVEL: INFO
+          LOG_DIR: ./logs
+          DATABASE_PATH: ./data/stock_analysis.db
+          STOCK_LIST: "600519,000858,300750"
+        run: python main.py --pre-market
