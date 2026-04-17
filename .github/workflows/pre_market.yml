@@ -2,8 +2,8 @@ name: 开盘前晨报推送
 
 on:
   schedule:
-    # 每个工作日 08:00 触发（UTC+8 = UTC 00:00）
-    - cron: '0 0 * * 1-5'
+    # 每个工作日 07:30 触发（UTC+8 = UTC 前日 23:30）
+    - cron: '30 23 * * 0-4'
   workflow_dispatch:  # 支持手动触发
 
 jobs:
