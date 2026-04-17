@@ -742,7 +742,7 @@ def _build_lianban_ladder(stocks: list[dict]) -> str:
     lines = []
     for lb in sorted(ladder.keys(), reverse=True):
         names = ladder[lb]
-        lbl = f"{lb}连板" if lb > 1 else "首板"
+        lbl = f'<font color="red">{lb}连板</font>' if lb > 1 else "首板"
         names_str = "　".join(names[:10]) + ("…" if len(names) > 10 else "")
         lines.append(f"**{lbl}**（{len(names)}只）　{names_str}")
     return "\n".join(lines)
@@ -855,7 +855,7 @@ def _build_report(
                 continue
             lines.append(f"**{_esc(g['group_name'])}**（{g['count']}只）")
             for s in g['stocks']:
-                lb = f" {s['lianban']}连板" if s['lianban'] > 1 else ""
+                lb = f' <font color="red">{s["lianban"]}连板</font>' if s['lianban'] > 1 else ""
                 reason = f" [{_esc(s['reason'])}]" if s['reason'] else ""
                 lines.append(f"　{_esc(s['name'])} 换手{s['turnover']:.1f}%{lb}{reason}")
             lines.append("")
@@ -863,7 +863,7 @@ def _build_report(
             solo_stocks.sort(key=lambda x: x['lianban'], reverse=True)
             lines.append(f"**个股题材**（{len(solo_stocks)}只）")
             for s in solo_stocks:
-                lb = f" {s['lianban']}连板" if s['lianban'] > 1 else ""
+                lb = f' <font color="red">{s["lianban"]}连板</font>' if s['lianban'] > 1 else ""
                 reason = f" [{_esc(s['reason'])}]" if s['reason'] else ""
                 lines.append(f"　{_esc(s['name'])} 换手{s['turnover']:.1f}%{lb}{reason}")
             lines.append("")
