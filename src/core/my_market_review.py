@@ -742,7 +742,7 @@ def _build_lianban_ladder(stocks: list[dict]) -> str:
     lines = []
     for lb in sorted(ladder.keys(), reverse=True):
         names = ladder[lb]
-        lbl = f'<font color="red">{lb}连板</font>' if lb > 1 else "首板"
+        lbl = f"{lb}连板" if lb > 1 else "首板"
         names_str = "　".join(names[:10]) + ("…" if len(names) > 10 else "")
         lines.append(f"**{lbl}**（{len(names)}只）　{names_str}")
     return "\n".join(lines)
