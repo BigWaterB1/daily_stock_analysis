@@ -848,9 +848,21 @@ def _build_report(
     if limit_up_groups:
         total_zt = sum(g['count'] for g in limit_up_groups)
         lines.append(f"共 **{total_zt}** 只涨停，按主题分布：\n")
+        solo_stocks = []  # 单股组统一收尾
         for g in limit_up_groups:
+            if g['count'] == 1:
+                solo_stocks.extend(g['stocks'])
+                continue
             lines.append(f"**{_esc(g['group_name'])}**（{g['count']}只）")
             for s in g['stocks']:
+                lb = f" {s['lianban']}连板" if s['lianban'] > 1 else ""
+                reason = f" [{_esc(s['reason'])}]" if s['reason'] else ""
+                lines.append(f"　{_esc(s['name'])} 换手{s['turnover']:.1f}%{lb}{reason}")
+            lines.append("")
+        if solo_stocks:
+            solo_stocks.sort(key=lambda x: x['lianban'], reverse=True)
+            lines.append(f"**个股题材**（{len(solo_stocks)}只）")
+            for s in solo_stocks:
                 lb = f" {s['lianban']}连板" if s['lianban'] > 1 else ""
                 reason = f" [{_esc(s['reason'])}]" if s['reason'] else ""
                 lines.append(f"　{_esc(s['name'])} 换手{s['turnover']:.1f}%{lb}{reason}")
