@@ -1,8 +1,7 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:  # 已关闭，个人项目无 PR 流程
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}

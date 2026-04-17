@@ -4,11 +4,7 @@
 name: Stale Issues & PRs
 
 on:
-  schedule:
-    # 每天 UTC 0:00（北京时间 8:00）检查一次
-    - cron: '0 0 * * *'
-  # 支持手动触发
-  workflow_dispatch:
+  workflow_dispatch:  # 定时已关闭，个人项目无需自动清理
 
 permissions:
   issues: write
