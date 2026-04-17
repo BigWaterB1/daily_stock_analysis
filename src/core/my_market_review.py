@@ -653,8 +653,13 @@ def _fetch_jike_reasons() -> dict[str, str]:
     """
     import re
     try:
+        from zoneinfo import ZoneInfo
+        from datetime import datetime as _dt
+        _now = _dt.now(ZoneInfo('Asia/Shanghai'))
+        # 收盘前（15:00 前）akshare 用上一交易日数据，jikefupan 同步用昨日页面
+        url = 'http://www.jikefupan.com/' if _now.hour >= 15 else 'http://www.jikefupan.com/zrzt'
         resp = requests.get(
-            'http://www.jikefupan.com/',
+            url,
             headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'http://www.jikefupan.com/'},
             timeout=10,
         )
@@ -680,12 +685,46 @@ def _fetch_jike_reasons() -> dict[str, str]:
         return {}
 
 
-def _group_limit_up_by_industry(stocks: list[dict]) -> list[dict]:
-    """按东财所属行业对涨停股分组，组内按连板数降序。"""
-    from collections import defaultdict
+def _group_limit_up_by_reason_semantic(stocks: list[dict]) -> list[dict]:
+    """
+    按涨停原因语义分组（词频驱动，零硬编码）。
+
+    算法：
+    1. 将极客复盘原因（如"储能+锂电池"）按 + 拆分为标签列表
+    2. 统计今日全部涨停股中各标签出现的频次
+    3. 每只股票取频次最高的标签作为分组 key（自动聚合当日热点）
+    4. 无原因或 ST/其他 的股票回退到东财所属行业
+
+    效果：算力热时 → "算力"组最大；机器人热时 → "机器人"组最大，每天自适应。
+    """
+    from collections import defaultdict, Counter
+
+    # 1. 拆分每只股票的原因标签
+    stock_tags: dict[str, list[str]] = {}
+    for s in stocks:
+        reason = (s.get('reason') or '').strip()
+        if reason and reason not in ('ST股', '其他', ''):
+            tags = [t.strip() for t in reason.split('+') if t.strip()]
+        else:
+            tags = []
+        stock_tags[s['name']] = tags
+
+    # 2. 统计全市场各标签频次
+    tag_freq: Counter = Counter(
+        tag for tags in stock_tags.values() for tag in tags
+    )
+
+    # 3. 每只股票取频次最高的标签；相同频次取原因中靠前的
+    def _best_tag(s: dict) -> str:
+        tags = stock_tags.get(s['name'], [])
+        if tags:
+            return max(tags, key=lambda t: tag_freq[t])
+        return s.get('industry') or '其他'
+
     groups: dict[str, list[dict]] = defaultdict(list)
     for s in stocks:
-        groups[s['industry'] or '其他'].append(s)
+        groups[_best_tag(s)].append(s)
+
     result = []
     for gname, members in groups.items():
         members.sort(key=lambda x: x['lianban'], reverse=True)
@@ -808,7 +847,7 @@ def _build_report(
 
     if limit_up_groups:
         total_zt = sum(g['count'] for g in limit_up_groups)
-        lines.append(f"共 **{total_zt}** 只涨停，按行业分布：\n")
+        lines.append(f"共 **{total_zt}** 只涨停，按主题分布：\n")
         for g in limit_up_groups:
             lines.append(f"**{_esc(g['group_name'])}**（{g['count']}只）")
             for s in g['stocks']:
@@ -855,7 +894,7 @@ def run_market_review(
         for s in zt_stocks:
             if jike_reasons.get(s['code']):
                 s['reason'] = jike_reasons[s['code']]
-        zt_groups = _group_limit_up_by_industry(zt_stocks) if zt_stocks else []
+        zt_groups = _group_limit_up_by_reason_semantic(zt_stocks) if zt_stocks else []
 
         report = _build_report(
             indices, stats, top_s, bot_s, prev_amount, zt_groups,
